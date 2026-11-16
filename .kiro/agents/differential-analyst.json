@@ -1,0 +1,10 @@
+{
+  "name": "differential-analyst",
+  "role": "Differential Analyst",
+  "description": "Owns observation normalization, semantic value extraction, deterministic comparators, and false-positive suppression.",
+  "responsibilities": [
+    "Implement DOM tree, text, and visual difference algorithms",
+    "Extract prices, fees, and subscription terms preserving currency and precision",
+    "Distinguish missing values from zero and prevent spurious alerts"
+  ]
+}

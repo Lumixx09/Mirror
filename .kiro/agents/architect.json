@@ -1,0 +1,10 @@
+{
+  "name": "architect",
+  "role": "Architect",
+  "description": "Owns architectural consistency, monorepo boundaries, dependency governance, and data contracts.",
+  "responsibilities": [
+    "Enforce separation of concerns between web, api, worker, and demo-store",
+    "Review API DTOs and database schema migrations",
+    "Ensure zero browser launching in API or Web tiers"
+  ]
+}

@@ -1,0 +1,172 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id             String          @id @default(uuid())
+  email          String          @unique
+  passwordHash   String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  investigations Investigation[]
+  auditEvents    AuditEvent[]
+}
+
+model AuthorizationScope {
+  id              String          @id @default(uuid())
+  permittedDomain String
+  purpose         String
+  reference       String?
+  acknowledgedAt  DateTime        @default(now())
+  investigations  Investigation[]
+}
+
+model Investigation {
+  id                   String              @id @default(uuid())
+  userId               String
+  user                 User                @relation(fields: [userId], references: [id])
+  title                String
+  description          String?
+  targetUrl            String
+  status               String              @default("draft") // draft, ready, running, completed, failed
+  authorizationScopeId String
+  authorizationScope   AuthorizationScope  @relation(fields: [authorizationScopeId], references: [id])
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+  experiments          Experiment[]
+  reports              Report[]
+  auditEvents          AuditEvent[]
+}
+
+model Experiment {
+  id                   String              @id @default(uuid())
+  investigationId      String
+  investigation        Investigation       @relation(fields: [investigationId], references: [id], onDelete: Cascade)
+  name                 String
+  configuration        Json
+  normalizationVersion Int                 @default(1)
+  createdAt            DateTime            @default(now())
+  sessions             ExperimentSession[]
+  journeys             Journey[]
+  runs                 ExecutionRun[]
+  findings             DifferenceFinding[]
+  reports              Report[]
+}
+
+model ExperimentSession {
+  id                       String               @id @default(uuid())
+  experimentId             String
+  experiment               Experiment           @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+  name                     String
+  configuration            Json
+  configurationFingerprint String
+  sessionRole              String               // baseline, comparison
+  createdAt                DateTime             @default(now())
+  observations             BrowserObservation[]
+}
+
+model Journey {
+  id           String        @id @default(uuid())
+  experimentId String
+  experiment   Experiment    @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+  name         String
+  version      Int           @default(1)
+  createdAt    DateTime      @default(now())
+  steps        JourneyStep[]
+}
+
+model JourneyStep {
+  id            String   @id @default(uuid())
+  journeyId     String
+  journey       Journey  @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+  sequence      Int
+  type          String   // navigate, click, fill, select, check, waitFor, capture, extract
+  configuration Json
+  createdAt     DateTime @default(now())
+}
+
+model ExecutionRun {
+  id                String               @id @default(uuid())
+  experimentId      String
+  experiment        Experiment           @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+  status            String               // queued, starting, running, analysing, completed, failed, cancelled
+  startedAt         DateTime?
+  completedAt       DateTime?
+  error             String?
+  workerId          String?
+  executionMetadata Json?
+  observations      BrowserObservation[]
+  artifacts         EvidenceArtifact[]
+}
+
+model BrowserObservation {
+  id                 String              @id @default(uuid())
+  executionRunId     String
+  executionRun       ExecutionRun        @relation(fields: [executionRunId], references: [id], onDelete: Cascade)
+  sessionId          String
+  session            ExperimentSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  observationType    String              // page_state, dom_snapshot, screenshot, network_metadata, commercial_value
+  payload            Json
+  capturedAt         DateTime            @default(now())
+  artifacts          EvidenceArtifact[]
+  baselineFindings   DifferenceFinding[] @relation("BaselineObservation")
+  comparisonFindings DifferenceFinding[] @relation("ComparisonObservation")
+}
+
+model DifferenceFinding {
+  id                      String              @id @default(uuid())
+  experimentId            String
+  experiment              Experiment          @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+  baselineObservationId   String?
+  baselineObservation     BrowserObservation? @relation("BaselineObservation", fields: [baselineObservationId], references: [id])
+  comparisonObservationId String?
+  comparisonObservation   BrowserObservation? @relation("ComparisonObservation", fields: [comparisonObservationId], references: [id])
+  type                    String              // price_difference, fee_difference, subscription_difference, etc.
+  severity                String              // info, low, medium, high, critical
+  confidence              Float
+  classification          String              // confirmed_observation, supported_interpretation, hypothesis
+  description             String
+  evidenceReferences      Json
+  createdAt               DateTime            @default(now())
+}
+
+model EvidenceArtifact {
+  id             String              @id @default(uuid())
+  executionRunId String
+  executionRun   ExecutionRun        @relation(fields: [executionRunId], references: [id], onDelete: Cascade)
+  observationId  String?
+  observation    BrowserObservation? @relation(fields: [observationId], references: [id])
+  type           String              // screenshot, dom_html, network_json, manifest, report_pdf
+  storageKey     String
+  sha256         String
+  size           Int
+  metadata       Json?
+  createdAt      DateTime            @default(now())
+}
+
+model Report {
+  id              String        @id @default(uuid())
+  investigationId String
+  investigation   Investigation @relation(fields: [investigationId], references: [id], onDelete: Cascade)
+  experimentId    String
+  experiment      Experiment    @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+  format          String        // json, pdf
+  storageKey      String
+  createdAt       DateTime      @default(now())
+}
+
+model AuditEvent {
+  id              String         @id @default(uuid())
+  userId          String?
+  user            User?          @relation(fields: [userId], references: [id])
+  investigationId String?
+  investigation   Investigation? @relation(fields: [investigationId], references: [id])
+  eventType       String
+  metadata        Json?
+  timestamp       DateTime       @default(now())
+}

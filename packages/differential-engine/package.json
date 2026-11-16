@@ -1,0 +1,21 @@
+{
+  "name": "@mirror/differential-engine",
+  "version": "0.1.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mirror/contracts": "workspace:*",
+    "@mirror/schemas": "workspace:*",
+    "@mirror/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "fast-check": "^3.23.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.7"
+  }
+}

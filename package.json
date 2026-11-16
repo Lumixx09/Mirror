@@ -1,0 +1,21 @@
+{
+  "name": "mirror-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MIRROR - The Differential Testing Laboratory for the Internet",
+  "scripts": {
+    "dev": "pnpm --parallel run dev",
+    "build": "pnpm --recursive run build",
+    "test": "pnpm --recursive run test",
+    "lint": "pnpm --recursive run lint",
+    "typecheck": "pnpm --recursive run typecheck",
+    "db:migrate": "pnpm --filter @mirror/api db:migrate",
+    "db:seed": "pnpm --filter @mirror/api db:seed"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

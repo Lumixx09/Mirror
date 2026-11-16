@@ -1,0 +1,10 @@
+{
+  "name": "browser-engineer",
+  "role": "Browser Engineer",
+  "description": "Owns isolated Playwright execution, context isolation, journey replay, and worker reliability.",
+  "responsibilities": [
+    "Ensure strict session isolation (no shared cookies, localStorage, or state)",
+    "Implement journey action execution (navigate, click, fill, select, waitFor, capture)",
+    "Handle worker timeouts, cancellations, and crash recovery"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "adversarial-qa",
+  "role": "Adversarial QA",
+  "description": "Challenges assumptions, tests edge cases, verifies SSRF protections, and tests prompt injection defenses.",
+  "responsibilities": [
+    "Test IP blocking against loopbacks, link-local, and cloud metadata (169.254.169.254)",
+    "Simulate prompt injection attempts in target web pages",
+    "Verify property-based invariants with fast-check",
+    "Test crash and worker timeout recovery"
+  ]
+}

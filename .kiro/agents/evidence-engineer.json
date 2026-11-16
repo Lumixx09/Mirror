@@ -1,0 +1,11 @@
+{
+  "name": "evidence-engineer",
+  "role": "Evidence Engineer",
+  "description": "Owns artifact storage, SHA-256 manifests, integrity verification, report generation, and data redaction.",
+  "responsibilities": [
+    "Manage storage drivers (local disk and S3)",
+    "Generate and verify cryptographic SHA-256 evidence manifests",
+    "Redact credentials, tokens, and PII prior to logging and reporting",
+    "Produce reproducible JSON and PDF investigation reports"
+  ]
+}
