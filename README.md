@@ -61,24 +61,37 @@ cd Mirror
 cp .env.example .env
 ```
 
-### 2. Start Services (PostgreSQL & Redis)
+### 2. Provide PostgreSQL & Redis
+Either run them locally with Docker:
 ```bash
 docker compose up -d
 ```
+or use hosted free tiers (no Docker needed) and set `DATABASE_URL` / `REDIS_URL` in `.env`:
+* **Supabase Postgres**: use the *Session pooler* connection string (IPv4). The direct `db.<ref>.supabase.co` host is IPv6-only.
+* **Upstash Redis**: use the `rediss://` TCP URL. The worker polls conservatively to stay within the free command quota.
 
-### 3. Install Dependencies
+### 3. Install Dependencies & Browser
 ```bash
-pnpm install
+pnpm install              # also generates the Prisma client
+pnpm browsers:install     # Chromium matching the installed Playwright version
 ```
 
 ### 4. Database Setup
 ```bash
-pnpm db:migrate
+pnpm db:migrate           # applies prisma/migrations
 ```
 
 ### 5. Start Development
 ```bash
-pnpm dev
+pnpm dev                  # builds packages, then runs web, api, worker and demo store
+```
+Then open the web workstation, click **New investigation → Load demo scenario → Create and run experiment**.
+
+### 6. Quality checks
+```bash
+pnpm typecheck
+pnpm test                 # unit + property-based tests (vitest, fast-check)
+pnpm build
 ```
 * **Web Workstation**: [http://localhost:5173](http://localhost:5173)
 * **API Control Plane**: [http://localhost:4000](http://localhost:4000)

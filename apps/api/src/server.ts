@@ -1,124 +1,102 @@
+import { config as loadEnv } from 'dotenv';
+import { resolveFromRoot } from '@mirror/shared';
+
+loadEnv({ path: resolveFromRoot('.env') });
+
 import http from 'node:http';
-import express from 'express';
-import cors from 'cors';
 import { WebSocketServer, WebSocket } from 'ws';
-import { CreateInvestigationSchema, TargetUrlSchema } from '@mirror/schemas';
-import { isPrivateOrBlockedIp } from '@mirror/shared';
+import type { MirrorEvent } from '@mirror/contracts';
+import { getPrisma, prepareDatabaseUrl } from '@mirror/db';
+import { createApp } from './app';
+import { createInfra } from './infra';
+import { resolveSession, tokenFromCookieHeader } from './auth';
 
-const app = express();
-const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+const PORT = Number(process.env.API_PORT || 4000);
 
-const PORT = process.env.API_PORT || 4000;
-
-app.use(cors());
-app.use(express.json());
-
-// In-memory store for fallback development when DB is connecting
-const inMemoryStore = {
-  investigations: new Map<string, any>(),
-  experiments: new Map<string, any>(),
-  runs: new Map<string, any>(),
-  findings: new Map<string, any>()
-};
-
-// WebSocket connection handling & event broadcasting
-const clients = new Set<WebSocket>();
-
-wss.on('connection', (ws) => {
-  clients.add(ws);
-  ws.send(JSON.stringify({ type: 'connected', timestamp: new Date().toISOString() }));
-  ws.on('close', () => clients.delete(ws));
-});
-
-export function broadcastEvent(eventType: string, payload: unknown) {
-  const message = JSON.stringify({ event: eventType, payload, timestamp: new Date().toISOString() });
-  for (const client of clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(message);
-    }
-  }
+interface Client {
+  socket: WebSocket;
+  userId: string;
 }
 
-// Health check endpoint
-app.get('/health', (_req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'api',
-    timestamp: new Date().toISOString()
-  });
-});
+async function main() {
+  await prepareDatabaseUrl();
+  const prisma = getPrisma();
 
-// Create investigation
-app.post('/api/v1/investigations', (req, res) => {
-  try {
-    const validated = CreateInvestigationSchema.parse(req.body);
-
-    // SSRF & authorization scope check
-    const url = new URL(validated.targetUrl);
-    if (isPrivateOrBlockedIp(url.hostname) && !process.env.ALLOWED_TEST_DOMAINS?.includes(url.hostname)) {
-      return res.status(403).json({
-        error: 'Target URL resolves to a prohibited internal IP or cloud metadata service.'
-      });
+  // Events are only delivered to the owner of the run. Ownership is cached per run.
+  const clients = new Set<Client>();
+  const runOwners = new Map<string, Promise<string | null>>();
+  const ownerOf = (runId: string) => {
+    if (!runOwners.has(runId)) {
+      runOwners.set(
+        runId,
+        prisma.executionRun
+          .findUnique({ where: { id: runId }, select: { experiment: { select: { investigation: { select: { userId: true } } } } } })
+          .then((r) => r?.experiment.investigation.userId ?? null)
+          .catch(() => null)
+      );
+      if (runOwners.size > 5000) runOwners.delete(runOwners.keys().next().value!);
     }
-
-    const id = crypto.randomUUID();
-    const investigation = {
-      id,
-      ...validated,
-      status: 'ready',
-      createdAt: new Date().toISOString()
-    };
-
-    inMemoryStore.investigations.set(id, investigation);
-    broadcastEvent('investigation:created', { id, title: investigation.title });
-
-    return res.status(201).json(investigation);
-  } catch (err: any) {
-    return res.status(400).json({ error: err.message, details: err.errors });
-  }
-});
-
-// List investigations
-app.get('/api/v1/investigations', (_req, res) => {
-  const items = Array.from(inMemoryStore.investigations.values());
-  res.json({ data: items, total: items.length });
-});
-
-// Get investigation by ID
-app.get('/api/v1/investigations/:id', (req, res) => {
-  const investigation = inMemoryStore.investigations.get(req.params.id);
-  if (!investigation) {
-    return res.status(404).json({ error: 'Investigation not found' });
-  }
-  return res.json(investigation);
-});
-
-// Start experiment run
-app.post('/api/v1/experiments/:id/run', (req, res) => {
-  const runId = crypto.randomUUID();
-  const run = {
-    id: runId,
-    experimentId: req.params.id,
-    status: 'queued',
-    startedAt: new Date().toISOString()
+    return runOwners.get(runId)!;
   };
+  const broadcast = async (event: MirrorEvent) => {
+    const owner = await ownerOf(event.runId);
+    if (!owner) return;
+    const message = JSON.stringify(event);
+    for (const client of clients) {
+      if (client.userId === owner && client.socket.readyState === WebSocket.OPEN) client.socket.send(message);
+    }
+  };
+  const infra = await createInfra((event) => void broadcast(event));
 
-  inMemoryStore.runs.set(runId, run);
-  broadcastEvent('experiment:queued', { runId, experimentId: req.params.id });
+  const app = createApp({
+    queue: infra.queue,
+    health: async () => {
+      const [db, redis] = await Promise.all([
+        prisma.$queryRaw`SELECT 1`.then(() => 'ok', () => 'unavailable'),
+        infra.redis.ping().then(() => 'ok', () => 'unavailable')
+      ]);
+      return { database: db, queue: redis };
+    }
+  });
 
-  return res.status(202).json(run);
-});
+  const server = http.createServer(app);
+  const allowedOrigins = (process.env.CORS_ORIGINS ?? process.env.WEB_URL ?? 'http://localhost:5173').split(',').map((s) => s.trim());
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 4 * 1024 });
 
-// Get run status
-app.get('/api/v1/runs/:id', (req, res) => {
-  const run = inMemoryStore.runs.get(req.params.id);
-  if (!run) {
-    return res.status(404).json({ error: 'Run not found' });
-  }
-  return res.json(run);
-});
+  server.on('upgrade', (req, socket, head) => {
+    const reject = (code: number) => {
+      socket.write(`HTTP/1.1 ${code} ${code === 401 ? 'Unauthorized' : 'Forbidden'}\r\n\r\n`);
+      socket.destroy();
+    };
+    if (!req.url?.startsWith('/ws')) return reject(403);
+    const origin = req.headers.origin;
+    if (origin && !allowedOrigins.includes(origin)) return reject(403);
+    void resolveSession(tokenFromCookieHeader(req.headers.cookie)).then((session) => {
+      if (!session) return reject(401);
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        const client: Client = { socket: ws, userId: session.userId };
+        clients.add(client);
+        ws.send(JSON.stringify({ event: 'connected', timestamp: new Date().toISOString() }));
+        ws.on('close', () => clients.delete(client));
+        ws.on('error', () => clients.delete(client));
+      });
+    }, () => reject(401));
+  });
 
-server.listen(PORT, () => {
-  console.log(`MIRROR API server running on port ${PORT}`);
+  server.listen(PORT, () => console.log(`[api] MIRROR API listening on http://localhost:${PORT}`));
+
+  const shutdown = async () => {
+    wss.close();
+    server.close();
+    await infra.close();
+    await prisma.$disconnect();
+    process.exit(0);
+  };
+  process.on('SIGINT', () => void shutdown());
+  process.on('SIGTERM', () => void shutdown());
+}
+
+main().catch((err) => {
+  console.error('[api] fatal:', err);
+  process.exit(1);
 });

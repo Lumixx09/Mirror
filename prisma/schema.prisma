@@ -10,11 +10,31 @@ generator client {
 model User {
   id             String          @id @default(uuid())
   email          String          @unique
+  name           String?
   passwordHash   String?
+  lastLoginAt    DateTime?
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
   investigations Investigation[]
   auditEvents    AuditEvent[]
+  sessions       AuthSession[]
+  reports        Report[]
+}
+
+/// Server-side login session. Only a SHA-256 of the cookie token is stored.
+model AuthSession {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String   @unique
+  userAgent  String?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+
+  @@index([userId])
 }
 
 model AuthorizationScope {
@@ -38,9 +58,12 @@ model Investigation {
   authorizationScope   AuthorizationScope  @relation(fields: [authorizationScopeId], references: [id])
   createdAt            DateTime            @default(now())
   updatedAt            DateTime            @updatedAt
+  archivedAt           DateTime?
   experiments          Experiment[]
   reports              Report[]
   auditEvents          AuditEvent[]
+
+  @@index([userId, createdAt])
 }
 
 model Experiment {
@@ -100,8 +123,13 @@ model ExecutionRun {
   error             String?
   workerId          String?
   executionMetadata Json?
+  createdAt         DateTime             @default(now())
   observations      BrowserObservation[]
   artifacts         EvidenceArtifact[]
+  findings          DifferenceFinding[]
+  reports           Report[]
+
+  @@index([experimentId, createdAt])
 }
 
 model BrowserObservation {
@@ -111,17 +139,26 @@ model BrowserObservation {
   sessionId          String
   session            ExperimentSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   observationType    String              // page_state, dom_snapshot, screenshot, network_metadata, commercial_value
+  checkpoint         String              @default("default")
   payload            Json
   capturedAt         DateTime            @default(now())
   artifacts          EvidenceArtifact[]
   baselineFindings   DifferenceFinding[] @relation("BaselineObservation")
   comparisonFindings DifferenceFinding[] @relation("ComparisonObservation")
+
+  @@index([executionRunId, sessionId])
 }
 
 model DifferenceFinding {
   id                      String              @id @default(uuid())
   experimentId            String
   experiment              Experiment          @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+  executionRunId          String
+  executionRun            ExecutionRun        @relation(fields: [executionRunId], references: [id], onDelete: Cascade)
+  baselineSessionId       String
+  comparisonSessionId     String
+  checkpoint              String
+  subjectKey              String              // normalized key of the compared subject (line item, control, text)
   baselineObservationId   String?
   baselineObservation     BrowserObservation? @relation("BaselineObservation", fields: [baselineObservationId], references: [id])
   comparisonObservationId String?
@@ -132,7 +169,12 @@ model DifferenceFinding {
   classification          String              // confirmed_observation, supported_interpretation, hypothesis
   description             String
   evidenceReferences      Json
+  details                 Json                // baseline/comparison values, locators, raw text
+  confidenceRationale     Json
   createdAt               DateTime            @default(now())
+
+  @@index([executionRunId])
+  @@index([experimentId, type])
 }
 
 model EvidenceArtifact {
@@ -147,6 +189,8 @@ model EvidenceArtifact {
   size           Int
   metadata       Json?
   createdAt      DateTime            @default(now())
+
+  @@index([executionRunId])
 }
 
 model Report {
@@ -155,9 +199,20 @@ model Report {
   investigation   Investigation @relation(fields: [investigationId], references: [id], onDelete: Cascade)
   experimentId    String
   experiment      Experiment    @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+  executionRunId  String
+  executionRun    ExecutionRun  @relation(fields: [executionRunId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   format          String        // json, pdf
   storageKey      String
+  sha256          String
+  size            Int
+  findingCount    Int
+  artifactCount   Int
+  contentDigest   String        // digest of the JSON report body
   createdAt       DateTime      @default(now())
+
+  @@index([userId, createdAt])
 }
 
 model AuditEvent {

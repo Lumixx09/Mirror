@@ -9,7 +9,9 @@
   },
   "dependencies": {
     "@mirror/contracts": "workspace:*",
-    "@mirror/schemas": "workspace:*"
+    "@mirror/schemas": "workspace:*",
+    "playwright": "^1.50.1",
+    "@mirror/shared": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.7.3"

@@ -1,161 +1,101 @@
-import { chromium } from 'playwright';
-import { LocalStorageDriver, generateManifest } from '@mirror/evidence-core';
-import { compareCommercialObservations, parsePrice } from '@mirror/differential-engine';
-import type { SessionConfiguration, ExtractedCommercialValue } from '@mirror/contracts';
-import { isPrivateOrBlockedIp } from '@mirror/shared';
+import { config as loadEnv } from 'dotenv';
+import { resolveFromRoot } from '@mirror/shared';
 
-const storage = new LocalStorageDriver(process.env.STORAGE_LOCAL_PATH || './storage');
+loadEnv({ path: resolveFromRoot('.env') });
 
-export interface WorkerJob {
+import { Worker, type Job } from 'bullmq';
+import IORedis from 'ioredis';
+import { chromium, type Browser } from 'playwright';
+import { EVENTS_CHANNEL, RUN_QUEUE_NAME, type MirrorEvent } from '@mirror/contracts';
+import { getPrisma, prepareDatabaseUrl } from '@mirror/db';
+import { createStorageDriver } from '@mirror/evidence-core';
+import { redisOptionsFromUrl } from '@mirror/shared';
+import { processRun, WORKER_ID } from './run-processor';
+
+interface RunJobData {
   runId: string;
-  experimentId: string;
-  targetUrl: string;
-  sessions: SessionConfiguration[];
 }
 
-export async function executeSession(
-  session: SessionConfiguration,
-  targetUrl: string,
-  runId: string
-): Promise<{ observationId: string; extractedValues: ExtractedCommercialValue[]; screenshotKey?: string }> {
-  const browser = await chromium.launch({
-    headless: process.env.BROWSER_HEADLESS !== 'false'
+async function main() {
+  if (!process.env.REDIS_URL) throw new Error('REDIS_URL is required');
+  if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
+
+  await prepareDatabaseUrl();
+  const redisOptions = await redisOptionsFromUrl(process.env.REDIS_URL);
+  const publisher = new IORedis(redisOptions);
+  const storage = createStorageDriver();
+  const prisma = getPrisma();
+
+  let browser: Browser | undefined;
+  const getBrowser = async () => {
+    if (!browser || !browser.isConnected()) {
+      browser = await chromium.launch({
+        headless: process.env.BROWSER_HEADLESS !== 'false',
+        // No flags that weaken isolation (no --disable-web-security, no --no-sandbox unless the host requires it).
+        chromiumSandbox: process.env.BROWSER_DISABLE_SANDBOX !== 'true'
+      });
+    }
+    return browser;
+  };
+
+  const publish = async (event: MirrorEvent) => {
+    await publisher.publish(EVENTS_CHANNEL, JSON.stringify(event)).catch((err) => {
+      console.error(`[worker] event publish failed: ${err.message}`);
+    });
+  };
+
+  const worker = new Worker<RunJobData>(
+    RUN_QUEUE_NAME,
+    async (job: Job<RunJobData>) => {
+      const started = Date.now();
+      console.log(`[worker] run=${job.data.runId} attempt=${job.attemptsMade + 1} started`);
+      const status = await processRun(job.data.runId, {
+        browser: await getBrowser(),
+        storage,
+        publish,
+        attempt: job.attemptsMade + 1
+      });
+      console.log(`[worker] run=${job.data.runId} finished status=${status} in ${Date.now() - started}ms`);
+      return { status };
+    },
+    {
+      connection: redisOptions,
+      concurrency: 1,
+      // Tuned for metered serverless Redis: long blocking waits, infrequent stall checks.
+      drainDelay: 30,
+      stalledInterval: 300_000,
+      lockDuration: 600_000,
+      maxStalledCount: 1
+    }
+  );
+
+  worker.on('failed', async (job, err) => {
+    console.error(`[worker] run=${job?.data.runId} job failed: ${err.message}`);
+    if (!job) return;
+    const finalAttempt = job.attemptsMade >= (job.opts.attempts ?? 1);
+    if (finalAttempt) {
+      await prisma.executionRun
+        .update({ where: { id: job.data.runId }, data: { status: 'failed', error: 'Worker infrastructure failure. See worker logs.', completedAt: new Date() } })
+        .catch(() => undefined);
+    }
   });
+  worker.on('error', (err) => console.error(`[worker] ${err.message}`));
 
-  try {
-    // Create isolated context - zero shared cookies/storage
-    const context = await browser.newContext({
-      viewport: session.viewport,
-      deviceScaleFactor: session.deviceScaleFactor || 1,
-      locale: session.locale || 'en-US',
-      timezoneId: session.timezoneId || 'America/New_York',
-      userAgent: session.userAgent,
-      extraHTTPHeaders: session.extraHeaders
-    });
+  console.log(`[worker] ${WORKER_ID} listening on queue "${RUN_QUEUE_NAME}"`);
 
-    const page = await context.newPage();
-
-    // Check target URL SSRF before navigation
-    const parsed = new URL(targetUrl);
-    if (isPrivateOrBlockedIp(parsed.hostname) && !process.env.ALLOWED_TEST_DOMAINS?.includes(parsed.hostname)) {
-      throw new Error(`Navigation blocked: ${parsed.hostname} is a protected internal destination.`);
-    }
-
-    // Step 1: Navigate to product
-    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-
-    // Step 2: Add to cart
-    const addToCartBtn = page.getByTestId('add-to-cart');
-    if (await addToCartBtn.isVisible()) {
-      await addToCartBtn.click();
-    }
-
-    // Step 3: Checkout
-    const checkoutBtn = page.getByTestId('checkout');
-    if (await checkoutBtn.isVisible()) {
-      await checkoutBtn.click();
-    }
-
-    // Step 4: Extract commercial values from checkout
-    const extractedValues: ExtractedCommercialValue[] = [];
-
-    // Extract product price
-    const priceLoc = page.getByTestId('product-price').first();
-    if (await priceLoc.isVisible()) {
-      const text = (await priceLoc.textContent()) || '';
-      const parsed = parsePrice(text);
-      extractedValues.push({
-        label: 'Hardware Security Key X-1',
-        amount: parsed.amount,
-        currency: parsed.currency,
-        rawText: text,
-        sourceLocator: '[data-testid="product-price"]',
-        confidence: 0.95
-      });
-    }
-
-    // Extract fee if present
-    const feeLoc = page.getByTestId('fee-item');
-    if (await feeLoc.isVisible()) {
-      const text = (await feeLoc.textContent()) || '';
-      const parsed = parsePrice(text);
-      extractedValues.push({
-        label: 'Regulatory Compliance Surcharge',
-        amount: parsed.amount,
-        currency: parsed.currency,
-        rawText: text,
-        sourceLocator: '[data-testid="fee-item"]',
-        confidence: 0.95
-      });
-    }
-
-    // Extract subscription if present
-    const subLoc = page.getByTestId('subscription-summary');
-    if (await subLoc.isVisible()) {
-      const text = (await subLoc.textContent()) || '';
-      extractedValues.push({
-        label: 'Priority Key Replacement',
-        amount: 19.99,
-        currency: 'USD',
-        rawText: text,
-        sourceLocator: '[data-testid="subscription-summary"]',
-        confidence: 0.90
-      });
-    }
-
-    // Step 5: Capture evidence screenshot
-    const screenshotBuffer = await page.screenshot({ fullPage: true });
-    const screenshotKey = `runs/${runId}/${session.id}/checkout.png`;
-    await storage.put(screenshotKey, screenshotBuffer);
-
-    await context.close();
-
-    return {
-      observationId: crypto.randomUUID(),
-      extractedValues,
-      screenshotKey
-    };
-  } finally {
-    await browser.close();
-  }
+  const shutdown = async (signal: string) => {
+    console.log(`[worker] ${signal} received, finishing current job...`);
+    await worker.close();
+    await browser?.close().catch(() => undefined);
+    await publisher.quit().catch(() => undefined);
+    await prisma.$disconnect();
+    process.exit(0);
+  };
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }
 
-export async function processExperimentRun(job: WorkerJob) {
-  console.log(`[Worker] Starting experiment run ${job.runId}`);
-  const results = new Map<string, { observationId: string; extractedValues: ExtractedCommercialValue[] }>();
-
-  for (const session of job.sessions) {
-    console.log(`[Worker] Executing session ${session.name} (${session.role})`);
-    const res = await executeSession(session, job.targetUrl, job.runId);
-    results.set(session.id, res);
-  }
-
-  // Find baseline session
-  const baselineSession = job.sessions.find((s) => s.role === 'baseline') || job.sessions[0];
-  const baselineResult = results.get(baselineSession.id);
-
-  if (!baselineResult) {
-    throw new Error('Baseline session observations could not be captured.');
-  }
-
-  // Compare each comparison session against baseline
-  const allFindings = [];
-  for (const session of job.sessions) {
-    if (session.id === baselineSession.id) continue;
-    const compResult = results.get(session.id);
-    if (!compResult) continue;
-
-    const findings = compareCommercialObservations({
-      experimentId: job.experimentId,
-      baselineObservationId: baselineResult.observationId,
-      comparisonObservationId: compResult.observationId,
-      baselineValues: baselineResult.extractedValues,
-      comparisonValues: compResult.extractedValues
-    });
-
-    allFindings.push(...findings);
-  }
-
-  console.log(`[Worker] Run ${job.runId} completed with ${allFindings.length} findings.`);
-  return allFindings;
-}
+main().catch((err) => {
+  console.error('[worker] fatal:', err);
+  process.exit(1);
+});
